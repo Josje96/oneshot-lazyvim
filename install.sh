@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================================
 # LazyVim One-Shot Installer
-# Sets up: Neovim (>= 0.9), JetBrainsMono Nerd Font, LazyVim starter config
+# Sets up: Neovim (>= 0.11), JetBrainsMono Nerd Font, LazyVim starter config
 #
 # Usage:
 #   ./install-lazyvim.sh            # full install
@@ -15,16 +15,26 @@ set -euo pipefail
 
 FONT_NAME="JetBrainsMono"
 FONT_REPO="ryanoasis/nerd-fonts"
-FONT_VERSION="v3.2.1"
+FONT_VERSION="v3.5.1"
 FONT_DIR="${HOME}/.local/share/fonts"
 LAZYNVIM_STARTER="https://github.com/LazyVim/starter"
 NVIM_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/nvim"
+# LazyVim (v15+) requires Neovim >= 0.11.2
 NVIM_MIN_MAJOR=0
-NVIM_MIN_MINOR=9
+NVIM_MIN_MINOR=11
+
+FONT_ONLY=0
 
 log()  { printf '\033[1;36m[install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
+
+for arg in "$@"; do
+  case "$arg" in
+    --font) FONT_ONLY=1 ;;
+    *) die "Unknown argument: $arg (supported: --font)" ;;
+  esac
+done
 
 # ----------------------------------------------------------------------------
 # Detect OS + package manager
@@ -42,7 +52,15 @@ if [[ "$OS" == "Linux" ]]; then
   fi
   if [[ $EUID -ne 0 ]]; then
     command -v sudo >/dev/null 2>&1 || die "sudo required for package installs"
-    SUDO="sudo"
+    if [[ "$FONT_ONLY" == "1" ]] && command -v curl >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+      log "Font-only install with curl/unzip present — no sudo needed"
+    else
+      # Fail early with a clear message when sudo can't prompt (piped/non-interactive runs)
+      if ! sudo -n true 2>/dev/null && ! (exec 3<>/dev/tty) 2>/dev/null; then
+        die "sudo needs a password but there is no terminal to prompt on — run this script in an interactive terminal (e.g. curl -fsSL <url> -o install.sh && bash install.sh), or run 'sudo -v' first"
+      fi
+      SUDO="sudo"
+    fi
   fi
   log "Detected Linux with package manager: $PM"
 elif [[ "$OS" == "Darwin" ]]; then
@@ -70,8 +88,15 @@ install_packages() {
 # git/curl/tar/unzip are needed regardless; ripgrep + fd are LazyVim-recommended
 NEEDED=(git curl tar unzip ripgrep fd-find)
 [[ "$PM" == "pacman" ]] && NEEDED=(git curl tar unzip ripgrep fd)   # arch names fd-find "fd"
-install_packages "${NEEDED[@]}"
+if [[ "$FONT_ONLY" != "1" ]]; then
+  install_packages "${NEEDED[@]}"
 
+  # Debian/Ubuntu name the fd binary "fdfind"; LazyVim expects "fd"
+  if [[ "$PM" == "apt" ]] && command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
+    $SUDO ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+    log "Symlinked fdfind -> /usr/local/bin/fd"
+  fi
+fi
 have_good_nvim() {
   command -v nvim >/dev/null 2>&1 || return 1
   local v
@@ -80,34 +105,46 @@ have_good_nvim() {
   (( major > NVIM_MIN_MAJOR || (major == NVIM_MIN_MAJOR && minor >= NVIM_MIN_MINOR) ))
 }
 
-if have_good_nvim && [[ "${FORCE:-0}" != "1" ]]; then
+install_nvim_appimage() {
+  local arch
+  case "$(uname -m)" in
+    x86_64)  arch="x86_64" ;;
+    aarch64) arch="arm64" ;;
+    *) die "Unsupported architecture for Neovim AppImage: $(uname -m)" ;;
+  esac
+  warn "Installing Neovim stable via official AppImage."
+  local tmp; tmp="$(mktemp -d)"
+  curl -sL "https://github.com/neovim/neovim/releases/latest/download/nvim-linux-${arch}.appimage" \
+    -o "$tmp/nvim.appimage"
+  chmod +x "$tmp/nvim.appimage"
+  # AppImages need libfuse2 at runtime; extract instead so it runs everywhere
+  (cd "$tmp" && ./nvim.appimage --appimage-extract >/dev/null)
+  $SUDO rm -rf /opt/nvim.appimage
+  $SUDO mv "$tmp/squashfs-root" /opt/nvim.appimage
+  $SUDO mkdir -p /usr/local/bin
+  $SUDO ln -sf /opt/nvim.appimage/AppRun /usr/local/bin/nvim
+  rm -rf "$tmp"
+}
+
+if [[ "$FONT_ONLY" == "1" ]]; then
+  : # font-only mode: nvim step is skipped
+elif have_good_nvim && [[ "${FORCE:-0}" != "1" ]]; then
   log "Neovim $(nvim --version | head -1 | grep -oE '[0-9]+\.[0-9]+') already installed — skipping"
 elif [[ "$PM" == "brew" ]]; then
   install_packages neovim
-elif [[ "$OS" == "Linux" ]] && command -v nvim >/dev/null 2>&1; then
-  # distro nvim exists but too old (common on Debian/Ubuntu) -> appimage
-  warn "Distro Neovim is too old (< ${NVIM_MIN_MAJOR}.${NVIM_MIN_MINOR}). Installing Neovim stable via AppImage."
-  $SUDO mkdir -p /usr/local/bin
-  curl -sL https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.appimage \
-    -o /tmp/nvim.appimage
-  chmod +x /tmp/nvim.appimage
-  # AppImages need libfuse2; extract instead so it runs everywhere
-  /tmp/nvim.appimage --appimage-extract >/dev/null
-  $SUDO mv /tmp/nvim.appimage /usr/local/bin/nvim.appimage 2>/dev/null || true
-  $SUDO rm -rf /opt/nvim.appimage
-  $SUDO mv squashfs-root /opt/nvim.appimage
-  $SUDO ln -sf /opt/nvim.appimage/AppRun /usr/local/bin/nvim
-  rm -f /tmp/nvim.appimage
-  have_good_nvim || die "AppImage install failed; please install Neovim >= 0.9 manually"
 else
-  # no nvim at all: try distro package first, fall back to AppImage if too old
-  install_packages neovim
+  # no suitable nvim: try the distro package, then fall back to the AppImage
+  if ! command -v nvim >/dev/null 2>&1; then
+    install_packages neovim
+  fi
   if ! have_good_nvim && [[ "$OS" == "Linux" ]]; then
-    warn "Distro neovim still too old, falling back to AppImage"
-    exec "$0" "$@"   # re-run; second pass takes the AppImage branch above
+    install_nvim_appimage
   fi
 fi
-log "Neovim OK: $(nvim --version | head -1)"
+if [[ "$FONT_ONLY" != "1" ]]; then
+  have_good_nvim || die "Neovim ${NVIM_MIN_MAJOR}.${NVIM_MIN_MINOR}+ install failed; please install it manually"
+  log "Neovim OK: $(nvim --version | head -1)"
+fi
 
 # ----------------------------------------------------------------------------
 # Step 2: JetBrainsMono Nerd Font (Linux only needs it locally; macOS: skip —
@@ -133,6 +170,19 @@ install_font() {
   log "Font installed to $FONT_DIR"
 }
 
+if [[ "$FONT_ONLY" == "1" ]]; then
+  # --font runs without sudo when curl/unzip are already present
+  missing=()
+  command -v curl >/dev/null 2>&1 || missing+=(curl)
+  command -v unzip >/dev/null 2>&1 || missing+=(unzip)
+  if ((${#missing[@]})); then
+    warn "Installing missing download tools: ${missing[*]}"
+    install_packages "${missing[@]}"
+  fi
+  install_font
+  exit 0
+fi
+
 if fc-list 2>/dev/null | grep -qi "JetBrainsMono Nerd Font" && [[ "${FORCE:-0}" != "1" ]]; then
   log "JetBrainsMono Nerd Font already installed — skipping"
 else
@@ -143,13 +193,10 @@ fi
 # Step 3: LazyVim starter config
 # ----------------------------------------------------------------------------
 backup_existing() {
-  if [[ -e "$NVIM_CONFIG" && ! -d "${NVIM_CONFIG}.bak" ]]; then
+  if [[ -e "$NVIM_CONFIG" ]]; then
     local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
     mv "$NVIM_CONFIG" "${NVIM_CONFIG}.bak.${stamp}"
     warn "Existing config backed up to ${NVIM_CONFIG}.bak.${stamp}"
-  elif [[ -d "${NVIM_CONFIG}.bak" ]]; then
-    # a prior backup exists and config dir is gone or stale — just remove
-    rm -rf "$NVIM_CONFIG"
   fi
 }
 
