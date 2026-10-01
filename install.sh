@@ -78,7 +78,10 @@ install_packages() {
   log "Installing packages: $*"
   case "$PM" in
     dnf)    $SUDO dnf install -y "$@" ;;
-    apt)    $SUDO apt-get update -y && $SUDO apt-get install -y "$@" ;;
+    apt)    # A broken third-party repo shouldn't abort the whole install;
+            # apt-get install can still use the existing package indexes.
+            $SUDO apt-get update -y || warn "apt-get update failed (a third-party repo on this system may be misconfigured) — trying to install with cached indexes"
+            $SUDO apt-get install -y "$@" ;;
     pacman) $SUDO pacman -Sy --noconfirm --needed "$@" ;;
     zypper) $SUDO zypper install -y "$@" ;;
     brew)   brew install "$@" ;;
