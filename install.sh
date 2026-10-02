@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # ============================================================================
 # LazyVim One-Shot Installer
-# Sets up: Neovim (>= 0.11), JetBrainsMono Nerd Font, LazyVim starter config
+# Sets up: Neovim (>= 0.11), JetBrainsMono Nerd Font, LazyVim starter config,
+# and every LazyVim dependency (lazygit, tree-sitter-cli, C compiler, fzf,
+# ripgrep, fd, node/npm, python3, clipboard tools)
 #
 # Usage:
-#   ./install-lazyvim.sh            # full install
-#   ./install-lazyvim.sh --font     # only install the Nerd Font
-#   FORCE=1 ./install-lazyvim.sh    # skip version/idempotency guards
+#   ./install.sh            # full install
+#   ./install.sh --font     # only install the Nerd Font
+#   FORCE=1 ./install.sh    # skip version/idempotency guards
 #
 # Safe to re-run: existing configs are backed up, installs are skipped
 # when already present and up to date.
@@ -88,16 +90,135 @@ install_packages() {
   esac
 }
 
-# git/curl/tar/unzip are needed regardless; ripgrep + fd are LazyVim-recommended
-NEEDED=(git curl tar unzip ripgrep fd-find)
-[[ "$PM" == "pacman" ]] && NEEDED=(git curl tar unzip ripgrep fd)   # arch names fd-find "fd"
+# Install the whole list in one go; if that fails (a name missing on this
+# distro release), retry one at a time so a single bad name doesn't sink the rest.
+install_packages_lenient() {
+  install_packages "$@" && return 0
+  warn "Bulk install failed — retrying packages one at a time"
+  local p
+  for p in "$@"; do
+    install_packages "$p" || warn "Could not install '$p' — skipping"
+  done
+}
+
+# Everything LazyVim (and the plugins it ships) expects on PATH:
+#   git curl tar unzip gzip wget  — lazy.nvim, blink.cmp, Mason downloads
+#   ripgrep fd fzf                — pickers / live grep
+#   C compiler + make             — nvim-treesitter parser builds
+#   node/npm, python3 + venv      — Mason-installed LSPs, formatters, linters
+#   xclip / wl-clipboard          — system clipboard on X11 / Wayland
+case "$PM" in
+  apt)    NEEDED=(git curl wget tar unzip gzip ripgrep fd-find fzf build-essential
+                  nodejs npm python3 python3-pip python3-venv xclip wl-clipboard) ;;
+  dnf)    NEEDED=(git curl wget tar unzip gzip ripgrep fd-find fzf gcc gcc-c++ make
+                  nodejs npm python3 python3-pip xclip wl-clipboard) ;;
+  pacman) NEEDED=(git curl wget tar unzip gzip ripgrep fd fzf base-devel
+                  nodejs npm python python-pip xclip wl-clipboard lazygit tree-sitter-cli) ;;
+  zypper) NEEDED=(git curl wget tar unzip gzip ripgrep fd fzf gcc gcc-c++ make
+                  nodejs-default npm-default python3 python3-pip xclip wl-clipboard) ;;
+  brew)   NEEDED=(git wget ripgrep fd fzf lazygit tree-sitter-cli node python) ;;
+esac
+# Don't shadow an existing Node (nvm, fnm, volta, ...) with the distro's older one
+if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+  filtered=()
+  for p in "${NEEDED[@]}"; do
+    case "$p" in nodejs|npm|nodejs-default|npm-default|node) ;; *) filtered+=("$p") ;; esac
+  done
+  NEEDED=("${filtered[@]}")
+fi
 if [[ "$FONT_ONLY" != "1" ]]; then
-  install_packages "${NEEDED[@]}"
+  install_packages_lenient "${NEEDED[@]}"
 
   # Debian/Ubuntu name the fd binary "fdfind"; LazyVim expects "fd"
   if [[ "$PM" == "apt" ]] && command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
+    $SUDO mkdir -p /usr/local/bin
     $SUDO ln -sf "$(command -v fdfind)" /usr/local/bin/fd
     log "Symlinked fdfind -> /usr/local/bin/fd"
+  fi
+
+  # macOS gets its C compiler from the Xcode Command Line Tools
+  if [[ "$OS" == "Darwin" ]] && ! xcode-select -p >/dev/null 2>&1; then
+    warn "Xcode Command Line Tools missing (needed to compile Treesitter parsers) — run: xcode-select --install"
+  fi
+fi
+
+# ----------------------------------------------------------------------------
+# Step 1b: lazygit + tree-sitter-cli from upstream releases (distro packages
+# are missing or too old on most non-Arch Linux distros)
+# ----------------------------------------------------------------------------
+# nvim-treesitter (main) needs tree-sitter-cli >= 0.26.1
+TS_MIN_MAJOR=0
+TS_MIN_MINOR=26
+TS_MIN_PATCH=1
+
+latest_tag() {  # resolves the /releases/latest redirect — avoids API rate limits
+  curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$1/releases/latest" | sed 's|.*/tag/||'
+}
+
+install_lazygit_release() {
+  local arch
+  case "$(uname -m)" in
+    x86_64)  arch="x86_64" ;;
+    aarch64) arch="arm64" ;;
+    *) warn "No lazygit binary for $(uname -m) — skipping"; return 0 ;;
+  esac
+  local tag; tag="$(latest_tag jesseduffield/lazygit)" || { warn "Could not resolve lazygit release — skipping"; return 0; }
+  local tmp; tmp="$(mktemp -d)"
+  log "Installing lazygit ${tag} from GitHub releases"
+  if curl -fsSL "https://github.com/jesseduffield/lazygit/releases/download/${tag}/lazygit_${tag#v}_linux_${arch}.tar.gz" \
+       | tar -xz -C "$tmp" lazygit; then
+    $SUDO mkdir -p /usr/local/bin
+    $SUDO install -m 0755 "$tmp/lazygit" /usr/local/bin/lazygit
+  else
+    warn "lazygit download failed — skipping"
+  fi
+  rm -rf "$tmp"
+}
+
+have_good_treesitter() {
+  command -v tree-sitter >/dev/null 2>&1 || return 1
+  local v
+  v="$(tree-sitter --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" || return 1
+  [[ -n "$v" ]] || return 1
+  local major minor patch
+  IFS=. read -r major minor patch <<<"$v"
+  (( major > TS_MIN_MAJOR ||
+     (major == TS_MIN_MAJOR && (minor > TS_MIN_MINOR ||
+       (minor == TS_MIN_MINOR && patch >= TS_MIN_PATCH))) ))
+}
+
+install_treesitter_release() {
+  local arch
+  case "$(uname -m)" in
+    x86_64)  arch="x64" ;;
+    aarch64) arch="arm64" ;;
+    *) warn "No tree-sitter binary for $(uname -m) — skipping"; return 0 ;;
+  esac
+  local tmp; tmp="$(mktemp -d)"
+  log "Installing tree-sitter-cli from GitHub releases"
+  if curl -fsSL "https://github.com/tree-sitter/tree-sitter/releases/latest/download/tree-sitter-linux-${arch}.gz" \
+       | gunzip > "$tmp/tree-sitter"; then
+    $SUDO mkdir -p /usr/local/bin
+    $SUDO install -m 0755 "$tmp/tree-sitter" /usr/local/bin/tree-sitter
+    hash -r
+  else
+    warn "tree-sitter-cli download failed — skipping"
+  fi
+  rm -rf "$tmp"
+}
+
+if [[ "$FONT_ONLY" != "1" && "$OS" == "Linux" ]]; then
+  if command -v lazygit >/dev/null 2>&1 && [[ "${FORCE:-0}" != "1" ]]; then
+    log "lazygit already installed — skipping"
+  else
+    install_lazygit_release
+  fi
+
+  if have_good_treesitter && [[ "${FORCE:-0}" != "1" ]]; then
+    log "tree-sitter-cli $(tree-sitter --version | grep -oE '[0-9.]+' | head -1) already installed — skipping"
+  else
+    install_treesitter_release
+    have_good_treesitter || warn "tree-sitter-cli ${TS_MIN_MAJOR}.${TS_MIN_MINOR}.${TS_MIN_PATCH}+ not available — Treesitter parsers won't build"
   fi
 fi
 have_good_nvim() {
@@ -220,6 +341,38 @@ fi
 log "Warming up plugin sync (this can take a minute)..."
 nvim --headless "+Lazy! sync" +qa >/dev/null 2>&1 || \
   warn "Headless sync had issues; run ':Lazy sync' inside nvim to retry"
+
+# ----------------------------------------------------------------------------
+# Dependency report
+# ----------------------------------------------------------------------------
+report() {  # report <label> <command>...  — first command found wins
+  local label="$1"; shift
+  local c
+  for c in "$@"; do
+    if command -v "$c" >/dev/null 2>&1; then
+      printf '  \033[1;32m✔\033[0m %-14s %s\n' "$label" "$(command -v "$c")"
+      return
+    fi
+  done
+  printf '  \033[1;31m✘\033[0m %-14s missing\n' "$label"
+}
+
+printf '\n  Dependencies:\n'
+report nvim nvim
+report git git
+report curl curl
+report ripgrep rg
+report fd fd
+report fzf fzf
+report lazygit lazygit
+report tree-sitter tree-sitter
+report "C compiler" cc gcc clang
+report node node
+report npm npm
+report python3 python3
+if [[ "$OS" == "Linux" ]]; then
+  report clipboard wl-copy xclip
+fi
 
 cat <<EOF
 

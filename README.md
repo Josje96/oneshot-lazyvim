@@ -22,7 +22,14 @@ git clone https://github.com/Josje96/oneshot-lazyvim.git && cd oneshot-lazyvim &
 | Neovim    | >= 0.11 (LazyVim's minimum) via your package manager; falls back to the official AppImage if the distro ships an older version |
 | Font      | [JetBrainsMono Nerd Font](https://github.com/ryanoasis/nerd-fonts) v3.5.1 → `~/.local/share/fonts` (Homebrew cask on macOS) |
 | LazyVim   | Official [starter](https://github.com/LazyVim/starter) cloned into `~/.config/nvim`, plugin sync warmed up headlessly |
-| Extras    | `ripgrep` + `fd` (LazyVim's recommended fuzzy-finders), plus `git curl tar unzip`. On Debian/Ubuntu `fd-find` is symlinked to `fd` |
+| Search    | `ripgrep`, `fd`, `fzf` (pickers / live grep). On Debian/Ubuntu `fd-find` is symlinked to `fd` |
+| lazygit   | Package manager on Arch/macOS, otherwise the latest upstream release → `/usr/local/bin` |
+| Treesitter | `tree-sitter-cli` >= 0.26.1 (package manager on Arch/macOS, otherwise upstream release) plus a C compiler (`build-essential` / `gcc` / `base-devel`; Xcode CLT on macOS) |
+| Mason     | `node` + `npm`, `python3` + `pip`/`venv`, `wget`, `gzip`, so LSPs, formatters and linters install cleanly. An existing Node (nvm etc.) is left alone |
+| Clipboard | `xclip` + `wl-clipboard` on Linux, so `"+y` works on X11 and Wayland |
+| Basics    | `git curl tar unzip` |
+
+At the end the script prints a ✔/✘ checklist of every dependency.
 
 ## After installing
 
