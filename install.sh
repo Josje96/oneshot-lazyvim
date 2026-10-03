@@ -336,6 +336,36 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# Step 3b: quiet :checkhealth noise (runs on existing configs too)
+#   - LazyVim needs no luarocks plugins, so lazy's hererocks check only errors
+#   - the python3/node/perl remote-plugin providers are unused by LazyVim
+# ----------------------------------------------------------------------------
+LAZY_LUA="$NVIM_CONFIG/lua/config/lazy.lua"
+OPTIONS_LUA="$NVIM_CONFIG/lua/config/options.lua"
+
+if [[ -f "$LAZY_LUA" ]] && ! grep -q "rocks" "$LAZY_LUA"; then
+  if grep -q 'require("lazy").setup({' "$LAZY_LUA"; then
+    awk '{ print } /require\("lazy"\)\.setup\(\{/ { print "  rocks = { enabled = false }," }' \
+      "$LAZY_LUA" > "$LAZY_LUA.tmp" && mv "$LAZY_LUA.tmp" "$LAZY_LUA"
+    log "Disabled luarocks support in $LAZY_LUA"
+  else
+    warn "Couldn't find lazy setup call in $LAZY_LUA — add 'rocks = { enabled = false }' manually"
+  fi
+fi
+
+if [[ -d "$(dirname "$OPTIONS_LUA")" ]] && ! grep -q "loaded_python3_provider" "$OPTIONS_LUA" 2>/dev/null; then
+  cat >> "$OPTIONS_LUA" <<'LUA'
+
+-- Remote-plugin providers aren't used by LazyVim; disabling them silences :checkhealth
+vim.g.loaded_python3_provider = 0
+vim.g.loaded_node_provider = 0
+vim.g.loaded_perl_provider = 0
+vim.g.loaded_ruby_provider = 0
+LUA
+  log "Disabled unused providers in $OPTIONS_LUA"
+fi
+
+# ----------------------------------------------------------------------------
 # Done — headless warm-up so the first real launch isn't a wall of installs
 # ----------------------------------------------------------------------------
 log "Warming up plugin sync (this can take a minute)..."
